@@ -5,16 +5,87 @@
 
 import streamlit as st
 import pandas as pd
-import numpy as np
 import matplotlib.pyplot as plt
 
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.neighbors import KNeighborsClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import accuracy_score, f1_score
 
-st.set_page_config(page_title="Copa do Mundo - Dashboard", layout="wide")
+st.set_page_config(
+    page_title="Copa do Mundo · Dashboard",
+    page_icon="⚽",
+    layout="wide",
+)
+
+# ============================================================
+# IDENTIDADE VISUAL — paleta semântica, estilo dos gráficos e CSS
+# ============================================================
+PALETA = {
+    "home": "#2a9d8f",   # vitória do mandante
+    "draw": "#e3b23c",   # empate
+    "away": "#e76f51",   # vitória do visitante
+    "ink":  "#2b3a42",   # texto e séries neutras
+    "soft": "#5b6b73",   # rótulos secundários
+}
+CORES_RESULTADO = [PALETA["home"], PALETA["draw"], PALETA["away"]]
+ROTULO_PT = {"Home win": "Vitória do mandante", "Draw": "Empate",
+             "Away Win": "Vitória do visitante"}
+COR_RESULTADO = {"Home win": PALETA["home"], "Draw": PALETA["draw"],
+                 "Away Win": PALETA["away"]}
+
+plt.rcParams.update({
+    "figure.facecolor": "none",
+    "axes.facecolor": "none",
+    "savefig.facecolor": "none",
+    "axes.edgecolor": "#cdbfa8",
+    "axes.labelcolor": PALETA["ink"],
+    "axes.titlesize": 12,
+    "axes.titleweight": "bold",
+    "text.color": PALETA["ink"],
+    "xtick.color": PALETA["soft"],
+    "ytick.color": PALETA["soft"],
+    "font.size": 10,
+})
+
+
+def estilo_eixo(ax, grid="y"):
+    """Remove molduras e aplica grid suave — visual consistente em todo o dashboard."""
+    for lado in ("top", "right"):
+        ax.spines[lado].set_visible(False)
+    if grid:
+        ax.grid(axis=grid, color="#e7dccb", linewidth=0.8, alpha=0.9)
+        ax.set_axisbelow(True)
+    return ax
+
+
+def aplicar_css():
+    st.markdown(
+        """
+        <style>
+          .block-container { padding-top: 2.4rem; padding-bottom: 3rem; max-width: 1180px; }
+          h1, h2, h3 { letter-spacing: -0.015em; }
+          div[data-testid="stMetric"], div[data-testid="metric-container"] {
+              background: #ffffff;
+              border: 1px solid #efe6d6;
+              border-bottom: 3px solid #2a9d8f;
+              border-radius: 10px;
+              padding: 14px 18px;
+          }
+          div[data-testid="stMetricLabel"] p { color: #5b6b73; font-weight: 600; }
+          section[data-testid="stSidebar"] { border-right: 1px solid #efe6d6; }
+          hr { border-color: #efe6d6; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
 
 CSV_PATH = "WorldCupMatches.csv"
-PREDITORAS = ["Stage_cat", "Attendance_cat", "Home Team Name"]
+# Preditoras enriquecidas: além da fase, público e mandante, o modelo agora usa
+# a seleção visitante e a década da partida — mais sinal para os algoritmos.
+PREDITORAS = ["Stage_cat", "Attendance_cat", "Home Team Name", "Away Team Name", "Decada"]
 ALVO = "Match Result"
 ROTULOS = ["Home win", "Draw", "Away Win"]
 
@@ -55,6 +126,9 @@ def carregar_dados():
     df["Attendance_cat"], faixas = pd.qcut(
         df["Attendance"], q=3, labels=["Baixo", "Médio", "Alto"], retbins=True
     )
+
+    # Década da partida (ex.: 1990s) -> captura a "época" do futebol como atributo
+    df["Decada"] = (df["Year"] // 10 * 10).astype(str) + "s"
     return df, faixas
 
 
@@ -64,15 +138,39 @@ def carregar_dados():
 @st.cache_resource
 def treinar_modelos(df):
     X = pd.get_dummies(df[PREDITORAS])
-    y = df[ALVO]
 
-    arvore = DecisionTreeClassifier(max_depth=6, min_samples_leaf=10, random_state=42)
-    arvore.fit(X, y)
+    # Rótulos codificados como inteiros: necessário para o KNN com métrica
+    # manhattan (evita um bug do scikit-learn com rótulos de texto) e uniformiza
+    # o tratamento das classes entre os modelos.
+    le = LabelEncoder()
+    y = le.fit_transform(df[ALVO])
 
-    knn = KNeighborsClassifier(n_neighbors=int(np.sqrt(len(X))))
-    knn.fit(X, y)
+    # Split treino/teste estratificado -> avaliação honesta (sem vazamento de dados)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.25, random_state=42, stratify=y
+    )
 
-    return X.columns, arvore, knn
+    # Hiperparâmetros otimizados via GridSearchCV (5-fold) no notebook SuperProjeto.ipynb
+    arvore = DecisionTreeClassifier(
+        criterion="entropy", max_depth=None, min_samples_leaf=10, random_state=42
+    )
+    arvore.fit(X_train, y_train)
+
+    knn = KNeighborsClassifier(n_neighbors=21, weights="distance", metric="manhattan")
+    knn.fit(X_train, y_train)
+
+    # Métricas no conjunto de teste (acurácia + F1 macro, que enxerga as 3 classes)
+    metricas = {}
+    for nome, modelo in [("Árvore de Decisão", arvore), ("KNN", knn)]:
+        pred = modelo.predict(X_test)
+        metricas[nome] = {
+            "Acurácia": accuracy_score(y_test, pred),
+            "F1 (macro)": f1_score(y_test, pred, average="macro", zero_division=0),
+        }
+    rotulo_home = le.transform(["Home win"])[0]
+    baseline = (y_test == rotulo_home).mean()  # acurácia de "chutar sempre o mandante"
+
+    return X.columns, arvore, knn, le, metricas, baseline
 
 
 # --- Teorema de Bayes (Naive Bayes manual, com suavização de Laplace) ---
@@ -94,26 +192,35 @@ def bayes_probabilidades(df, entrada, alpha=1):
     return {c: scores[c] / total for c in classes}
 
 
-def proba_sklearn(modelo, colunas, entrada):
+def proba_sklearn(modelo, colunas, entrada, le):
     """Monta a linha one-hot da entrada do usuário e devolve as probabilidades."""
     linha = pd.get_dummies(pd.DataFrame([entrada]))
     linha = linha.reindex(columns=colunas, fill_value=0)
     probs = modelo.predict_proba(linha)[0]
-    return dict(zip(modelo.classes_, probs))
+    classes = le.inverse_transform(modelo.classes_)  # inteiros -> rótulos de texto
+    return dict(zip(classes, probs))
 
 
 # ============================================================
 # APP
 # ============================================================
 df, faixas = carregar_dados()
-colunas, arvore, knn = treinar_modelos(df)
+colunas, arvore, knn, le, metricas, baseline = treinar_modelos(df)
 
-st.title("⚽ Dashboard - Copa do Mundo")
-st.caption("Análise de dados e classificação probabilística do resultado das partidas")
+aplicar_css()
 
+st.title("⚽ Copa do Mundo · Dashboard")
+st.caption(
+    f"Análise exploratória e classificação do resultado das partidas  ·  "
+    f"{len(df):,} jogos  ·  {df['Year'].min()}–{df['Year'].max()}".replace(",", ".")
+)
+st.divider()
+
+st.sidebar.markdown("### ⚽ Navegação")
 secao = st.sidebar.radio(
-    "Navegação",
+    "Seção",
     ["Seção 1 — Análise dos Dados", "Seção 2 — Classificação Probabilística"],
+    label_visibility="collapsed",
 )
 
 
@@ -161,15 +268,18 @@ if secao.startswith("Seção 1"):
     # ===== KPIs que reagem aos filtros =====
     st.caption(f"Mostrando **{len(dff)}** de {len(df)} partidas "
                f"(período {anos[0]}–{anos[1]}).")
+    pct_mandante = (dff[ALVO] == "Home win").mean() * 100
+    pct_geral = (df[ALVO] == "Home win").mean() * 100
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Partidas", len(dff))
-    k2.metric("Gols por jogo (média)",
+    k1.metric("Partidas", f"{len(dff)}")
+    k2.metric("Gols por jogo",
               f"{(dff['Home Team Goals'] + dff['Away Team Goals']).mean():.2f}")
-    k3.metric("Público médio", f"{dff['Attendance'].mean():,.0f}")
-    k4.metric("Vitórias do mandante",
-              f"{(dff[ALVO] == 'Home win').mean()*100:.0f}%")
+    k3.metric("Público médio", f"{dff['Attendance'].mean():,.0f}".replace(",", "."))
+    k4.metric("Vitórias do mandante", f"{pct_mandante:.0f}%",
+              delta=f"{pct_mandante - pct_geral:+.0f} pp vs. geral",
+              delta_color="off")
 
-    st.markdown("---")
+    st.divider()
     col1, col2 = st.columns(2)
 
     # --- Gráfico 1: distribuição de gols (mandante x visitante) ---
@@ -181,14 +291,15 @@ if secao.startswith("Seção 1"):
                         horizontal=True, key="g1")
         fig, ax = plt.subplots()
         if quem in ("Ambos", "Mandante"):
-            ax.hist(dff["Home Team Goals"], bins=range(0, 12), alpha=0.6,
-                    label="Mandante", color="#2a9d8f")
+            ax.hist(dff["Home Team Goals"], bins=range(0, 12), alpha=0.75,
+                    label="Mandante", color=PALETA["home"])
         if quem in ("Ambos", "Visitante"):
-            ax.hist(dff["Away Team Goals"], bins=range(0, 12), alpha=0.6,
-                    label="Visitante", color="#e76f51")
+            ax.hist(dff["Away Team Goals"], bins=range(0, 12), alpha=0.75,
+                    label="Visitante", color=PALETA["away"])
         ax.set_xlabel("Gols na partida")
         ax.set_ylabel("Nº de partidas")
-        ax.legend()
+        ax.legend(frameon=False)
+        estilo_eixo(ax)
         st.pyplot(fig)
 
     # --- Gráfico 2: distribuição dos resultados (variável alvo) ---
@@ -199,16 +310,19 @@ if secao.startswith("Seção 1"):
         tipo = st.radio("Tipo de gráfico:", ["Barras", "Pizza"],
                         horizontal=True, key="g2")
         contagem = dff[ALVO].value_counts().reindex(ROTULOS).fillna(0)
-        cores = ["#2a9d8f", "#e9c46a", "#e76f51"]
         fig, ax = plt.subplots()
         if tipo == "Barras":
-            ax.bar(contagem.index, contagem.values, color=cores)
+            ax.bar(contagem.index, contagem.values, color=CORES_RESULTADO)
             ax.set_ylabel("Nº de partidas")
             for i, v in enumerate(contagem.values):
-                ax.text(i, v, str(int(v)), ha="center", va="bottom")
+                ax.text(i, v, str(int(v)), ha="center", va="bottom",
+                        color=PALETA["ink"], fontweight="bold")
+            estilo_eixo(ax)
         else:
-            ax.pie(contagem.values, labels=contagem.index, colors=cores,
-                   autopct="%1.1f%%", startangle=90)
+            ax.pie(contagem.values, labels=contagem.index, colors=CORES_RESULTADO,
+                   autopct="%1.1f%%", startangle=90,
+                   wedgeprops={"edgecolor": "#faf7f2", "linewidth": 2},
+                   textprops={"color": PALETA["ink"]})
             ax.axis("equal")
         st.pyplot(fig)
 
@@ -221,12 +335,13 @@ if secao.startswith("Seção 1"):
                    "(variável contínua → histograma).")
         bins = st.slider("Nº de faixas (bins)", 10, 60, 30, key="g3")
         fig, ax = plt.subplots()
-        ax.hist(dff["Attendance"], bins=bins, color="#264653")
-        ax.axvline(dff["Attendance"].mean(), color="#e76f51", linestyle="--",
-                   label=f"Média: {dff['Attendance'].mean():,.0f}")
+        ax.hist(dff["Attendance"], bins=bins, color=PALETA["ink"])
+        ax.axvline(dff["Attendance"].mean(), color=PALETA["away"], linestyle="--",
+                   linewidth=2, label=f"Média: {dff['Attendance'].mean():,.0f}".replace(",", "."))
         ax.set_xlabel("Público")
         ax.set_ylabel("Nº de partidas")
-        ax.legend()
+        ax.legend(frameon=False)
+        estilo_eixo(ax)
         st.pyplot(fig)
 
     # --- Gráfico 4: saldo de gols médio por ano (tendência temporal) ---
@@ -236,10 +351,12 @@ if secao.startswith("Seção 1"):
                    "partidas (série temporal → gráfico de linha).")
         serie = dff.groupby("Year")["Goal Difference"].mean()
         fig, ax = plt.subplots()
-        ax.plot(serie.index, serie.values, marker="o", color="#2a9d8f")
-        ax.axhline(0, color="gray", linestyle="--")
+        ax.fill_between(serie.index, serie.values, 0, color=PALETA["home"], alpha=0.12)
+        ax.plot(serie.index, serie.values, marker="o", color=PALETA["home"], linewidth=2)
+        ax.axhline(0, color=PALETA["soft"], linestyle="--", linewidth=1)
         ax.set_xlabel("Ano")
         ax.set_ylabel("Saldo médio (mandante)")
+        estilo_eixo(ax)
         st.pyplot(fig)
 
     col5, col6 = st.columns(2)
@@ -254,8 +371,9 @@ if secao.startswith("Seção 1"):
         total = (gols_casa.add(gols_fora, fill_value=0)
                  .sort_values(ascending=False).head(top_n))
         fig, ax = plt.subplots()
-        ax.barh(total.index[::-1], total.values[::-1], color="#2a9d8f")
+        ax.barh(total.index[::-1], total.values[::-1], color=PALETA["home"])
         ax.set_xlabel("Total de gols")
+        estilo_eixo(ax, grid="x")
         st.pyplot(fig)
 
     # --- Gráfico 6: cidades que mais sediaram jogos ---
@@ -265,8 +383,9 @@ if secao.startswith("Seção 1"):
                    "(comparação de frequência → barras).")
         cidades = dff["City"].value_counts().head(top_n)
         fig, ax = plt.subplots()
-        ax.barh(cidades.index[::-1], cidades.values[::-1], color="#e76f51")
+        ax.barh(cidades.index[::-1], cidades.values[::-1], color=PALETA["away"])
         ax.set_xlabel("Nº de partidas")
+        estilo_eixo(ax, grid="x")
         st.pyplot(fig)
 
     # --- Gráfico 7: gols mandante x visitante por ano (comparação) ---
@@ -275,10 +394,11 @@ if secao.startswith("Seção 1"):
                "(comparação de duas séries → barras agrupadas).")
     gols_ano = dff.groupby("Year")[["Home Team Goals", "Away Team Goals"]].sum()
     fig, ax = plt.subplots(figsize=(11, 4))
-    gols_ano.plot(kind="bar", ax=ax, color=["#2a9d8f", "#e76f51"])
+    gols_ano.plot(kind="bar", ax=ax, color=[PALETA["home"], PALETA["away"]], width=0.8)
     ax.set_xlabel("Ano")
     ax.set_ylabel("Total de gols")
-    ax.legend(["Mandante", "Visitante"])
+    ax.legend(["Mandante", "Visitante"], frameon=False)
+    estilo_eixo(ax)
     st.pyplot(fig)
 
     # --- Tabela opcional dos dados filtrados ---
@@ -298,69 +418,107 @@ else:
     st.write("Informe os dados de uma partida e veja a previsão dos **três métodos**: "
              "Teorema de Bayes, Árvore de Decisão e KNN.")
 
+    # ---- Desempenho dos modelos (avaliação honesta em conjunto de teste) ----
+    with st.expander("📈 Desempenho dos modelos no conjunto de teste"):
+        tabela_m = (pd.DataFrame(metricas).T * 100).round(1).astype(str) + " %"
+        st.table(tabela_m)
+        st.caption(
+            f"Avaliado em 25% dos dados (split estratificado). "
+            f"Baseline — chutar sempre 'Home win': **{baseline*100:.1f}%**. "
+            "Hiperparâmetros escolhidos por GridSearchCV (validação cruzada 5-fold)."
+        )
+
     # ---- Interface de entrada do usuário ----
     st.subheader("Atributos da partida")
+    times = sorted(set(df["Home Team Name"]) | set(df["Away Team Name"]))
     c1, c2, c3 = st.columns(3)
     with c1:
         fase = st.selectbox("Fase", ["Fase de Grupos", "Mata-mata"])
-    with c2:
         publico = st.slider("Público", int(df["Attendance"].min()),
                             int(df["Attendance"].max()), 45000, step=1000)
-    with c3:
-        times = sorted(df["Home Team Name"].unique())
+    with c2:
         time_casa = st.selectbox("Seleção mandante", times,
                                  index=times.index("Brazil") if "Brazil" in times else 0)
+        time_fora = st.selectbox("Seleção visitante", times,
+                                 index=times.index("Italy") if "Italy" in times else 1)
+    with c3:
+        anos_disp = sorted(df["Year"].unique())
+        ano = st.selectbox("Ano da Copa", anos_disp, index=len(anos_disp) - 1)
 
     # Converte o público para a faixa categórica (Baixo / Médio / Alto)
     publico_cat = str(pd.cut([publico], bins=faixas,
                              labels=["Baixo", "Médio", "Alto"],
                              include_lowest=True)[0])
+    decada = f"{ano // 10 * 10}s"
     entrada = {"Stage_cat": fase, "Attendance_cat": publico_cat,
-               "Home Team Name": time_casa}
-    st.info(f"Entrada interpretada → Fase: **{fase}** | "
-            f"Público: **{publico_cat}** | Mandante: **{time_casa}**")
+               "Home Team Name": time_casa, "Away Team Name": time_fora,
+               "Decada": decada}
+    st.info(f"Entrada interpretada → Fase: **{fase}** | Público: **{publico_cat}** | "
+            f"Mandante: **{time_casa}** | Visitante: **{time_fora}** | Década: **{decada}**")
 
     if st.button("Classificar partida", type="primary"):
         # ---- Calcula as probabilidades dos três métodos ----
         p_bayes = bayes_probabilidades(df, entrada)
-        p_arvore = proba_sklearn(arvore, colunas, entrada)
-        p_knn = proba_sklearn(knn, colunas, entrada)
+        p_arvore = proba_sklearn(arvore, colunas, entrada, le)
+        p_knn = proba_sklearn(knn, colunas, entrada, le)
 
         metodos = {
             "Teorema de Bayes": p_bayes,
             "Árvore de Decisão": p_arvore,
             "KNN": p_knn,
         }
+        predicoes = {nome: max(probs, key=probs.get) for nome, probs in metodos.items()}
+
+        # ---- Consenso em destaque ----
+        votos = pd.Series(list(predicoes.values())).value_counts()
+        consenso, n_votos = votos.index[0], int(votos.iloc[0])
+        cor = COR_RESULTADO[consenso]
+        concordam = "os 3 métodos concordam" if n_votos == 3 else f"{n_votos} de 3 métodos concordam"
+        st.markdown(
+            f"""
+            <div style="background:{cor}14; border:1px solid {cor}55;
+                        border-radius:12px; padding:18px 22px; margin:6px 0 4px;">
+              <span style="color:{PALETA['soft']}; font-size:0.85rem; font-weight:600;
+                           text-transform:uppercase; letter-spacing:.04em;">Resultado mais provável</span>
+              <div style="color:{cor}; font-size:1.6rem; font-weight:800; margin-top:2px;">
+                {ROTULO_PT[consenso]}
+              </div>
+              <span style="color:{PALETA['soft']}; font-size:0.9rem;">{concordam}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
         # ---- Predição de cada método ----
-        st.subheader("Predição de cada método")
+        st.markdown("##### Previsão de cada método")
         cols = st.columns(3)
         for col, (nome, probs) in zip(cols, metodos.items()):
             pred = max(probs, key=probs.get)
-            col.metric(nome, pred, f"{probs[pred]*100:.1f}% de confiança")
+            col.metric(nome, ROTULO_PT[pred], f"{probs[pred]*100:.1f}% de confiança",
+                       delta_color="off")
 
-        # ---- Probabilidades por classe (Bayes em destaque) ----
-        st.subheader("Probabilidades pelo Teorema de Bayes")
-        tabela_bayes = (pd.Series(p_bayes).reindex(ROTULOS) * 100).round(1)
-        st.bar_chart(tabela_bayes)
+        st.divider()
 
         # ---- Comparação visual entre os três métodos ----
-        st.subheader("Comparação visual entre os três métodos")
-        st.caption("Probabilidade atribuída a cada resultado por cada método.")
+        st.markdown("##### Probabilidade por classe — Bayes × Árvore × KNN")
+        st.caption("Cada grupo de barras mostra a probabilidade que os três métodos "
+                   "atribuem a um mesmo resultado.")
         comp = pd.DataFrame(
             {nome: [probs.get(r, 0) * 100 for r in ROTULOS]
              for nome, probs in metodos.items()},
-            index=ROTULOS,
+            index=[ROTULO_PT[r] for r in ROTULOS],
         )
 
-        fig, ax = plt.subplots(figsize=(9, 4.5))
-        comp.plot(kind="bar", ax=ax, rot=0, edgecolor="black")
+        fig, ax = plt.subplots(figsize=(9, 4.2))
+        comp.plot(kind="bar", ax=ax, rot=0, width=0.8,
+                  color=[PALETA["home"], PALETA["ink"], PALETA["away"]])
         ax.set_ylabel("Probabilidade (%)")
-        ax.set_xlabel("Resultado")
-        ax.set_title("Probabilidade por classe — Bayes x Árvore x KNN")
-        ax.legend(title="Método")
+        ax.set_xlabel("")
+        ax.legend(title="Método", frameon=False)
         for cont in ax.containers:
-            ax.bar_label(cont, fmt="%.0f", fontsize=8, padding=2)
+            ax.bar_label(cont, fmt="%.0f", fontsize=8, padding=2, color=PALETA["soft"])
+        estilo_eixo(ax)
         st.pyplot(fig)
 
-        st.dataframe(comp.round(1).astype(str) + " %")
+        with st.expander("🔢 Ver tabela de probabilidades (%)"):
+            st.dataframe(comp.round(1).astype(str) + " %", width="stretch")

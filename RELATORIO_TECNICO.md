@@ -35,6 +35,8 @@ A variável categórica de interesse é o **resultado da partida** (`Match Resul
 | `Stage_cat` | Categórica | Fase: *Fase de Grupos* (639) ou *Mata-mata* (213) |
 | `Attendance_cat` | Categórica | Faixa de público em tercis: *Baixo*, *Médio*, *Alto* |
 | `Home Team Name` | Categórica | Seleção mandante |
+| `Away Team Name` | Categórica | Seleção visitante *(atributo adicionado para reforçar os modelos)* |
+| `Decada` | Categórica | Década da partida, ex.: *1990s* *(captura a "época" do futebol)* |
 
 ---
 
@@ -89,9 +91,10 @@ df["Match Result"] = df.apply(lambda r: "Home win" if r["Home Team Goals"] > r["
                               else ("Away Win" if r["Home Team Goals"] < r["Away Team Goals"] else "Draw"), axis=1)
 df["Stage_cat"] = df["Stage"].apply(lambda s: "Fase de Grupos"
                   if str(s).startswith(("Group", "First", "Preliminary")) else "Mata-mata")
+df["Decada"] = (df["Year"] // 10 * 10).astype(str) + "s"   # ex.: 1990s
 ```
 
-**Justificativa:** cria a **variável alvo** (`Match Result`) a partir do placar, o saldo de gols (`Goal Difference`) e simplifica a coluna `Stage` (que tinha dezenas de rótulos diferentes) em duas categorias interpretáveis.
+**Justificativa:** cria a **variável alvo** (`Match Result`) a partir do placar, o saldo de gols (`Goal Difference`), simplifica a coluna `Stage` em duas categorias interpretáveis e deriva a **década** da partida. A década, junto com a **seleção visitante** (já presente no dataset), foram incorporadas como preditoras dos modelos de classificação — essa engenharia de atributos foi decisiva para o desempenho final (ver Seção 6).
 
 ### 3.5 Discretização do público (tercis)
 
@@ -143,27 +146,43 @@ Para uma partida com **mandante = Brasil, fase = Fase de Grupos, público = Alto
 
 O resultado é coerente: o Brasil, como maior artilheiro histórico e jogando como mandante, tem probabilidade de vitória bem acima da priori geral (57,3% → 74,5%), demonstrando que o modelo aprende o efeito das evidências.
 
-> Implementação na função `bayes_probabilidades()` em `app.py`.
+> Este exemplo usa a versão **conceitual** do Bayes (3 atributos), para clareza didática. No dashboard e na comparação final (Seção 6), o Bayes utiliza o mesmo conjunto enriquecido de preditoras dos demais modelos. Implementação na função `bayes_probabilidades()` em `app.py`.
 
 ---
 
 ## 6. Resultados da classificação
 
-Além do Bayes, foram treinados dois algoritmos do scikit-learn, avaliados em conjunto de teste (25% dos dados, estratificado):
+Além do Bayes, foram treinados dois algoritmos do scikit-learn — **Árvore de Decisão** e **KNN** — avaliados em conjunto de teste (25% dos dados, estratificado). Para extrair o máximo deles, aplicou-se:
+
+1. **Tuning de hiperparâmetros** via `GridSearchCV` com validação cruzada (5-fold), buscando a melhor combinação automaticamente:
+   - Árvore: `criterion="entropy"`, `max_depth=None`, `min_samples_leaf=10`;
+   - KNN: `n_neighbors=21`, `weights="distance"`, `metric="manhattan"`.
+2. **Engenharia de atributos:** as preditoras foram enriquecidas com a **seleção visitante** e a **década** da partida (de ~83 para 174 colunas após o one-hot encoding).
+
+### Métricas no conjunto de teste
 
 | Modelo | Acurácia | Precisão (macro) | Recall (macro) | F1 (macro) |
 |---|---|---|---|---|
-| **Árvore de Decisão** | 0,573 | 0,191 | 0,333 | 0,243 |
-| **KNN** | 0,577 | 0,343 | 0,370 | 0,321 |
+| **KNN** (k=21, manhattan) | **0,606** | **0,50** | **0,44** | **0,43** |
+| **Árvore de Decisão** (entropy) | 0,606 | 0,47 | 0,43 | 0,41 |
+| Teorema de Bayes | 0,582 | 0,42 | 0,43 | 0,41 |
 | *Baseline (chutar sempre "Home win")* | *0,573* | — | — | — |
 
 **Comparação e interpretação:**
 
-- Os três métodos convergem para **acurácia em torno de 57%**, muito próxima da classe majoritária (57,3% de vitórias do mandante). Isso indica que, com apenas três preditoras categóricas, **o fator casa domina a previsão**.
-- O **KNN** apresenta o melhor equilíbrio entre as classes (F1 macro = 0,321), enquanto a **Árvore** tende a prever quase sempre "Home win" (F1 macro baixo), refletindo o forte desbalanceamento.
-- A **abordagem bayesiana** tem a vantagem de fornecer **probabilidades interpretáveis por classe** (não só um rótulo), o que a torna mais informativa para o usuário do dashboard, mesmo com desempenho de acurácia semelhante.
+- Após o tuning **e** a engenharia de atributos, **a Árvore e o KNN passaram a superar tanto o baseline (57,3%) quanto o Teorema de Bayes (58,2%)**, atingindo **60,6%** de acurácia. O **KNN foi o melhor modelo geral** (F1 macro = 0,43).
+- O ganho veio principalmente das **novas preditoras**: a Árvore saltou de 0,24 para **0,41** de F1 macro e o KNN de 0,32 para **0,43**. Os atributos mais informativos da Árvore passaram a ser a **década** da partida e a **fase** (mata-mata), confirmando que contexto agrega sinal real.
+- Os modelos agora **acertam parte das classes minoritárias** (o KNN recupera 15% dos empates e 25% das vitórias do visitante), algo que antes era praticamente nulo.
+- A **abordagem bayesiana** continua competitiva (empata em F1 macro) e mantém a vantagem de fornecer **probabilidades interpretáveis por classe**, útil para o dashboard.
 
-O dashboard (Seção 2) permite comparar visualmente as previsões dos **três métodos** lado a lado para qualquer partida informada pelo usuário.
+### Comunicação dos resultados — o dashboard
+
+Todos os resultados são apresentados num **dashboard interativo** (`app.py`, em Streamlit), pensado para leitura clara durante a apresentação:
+
+- **Seção 1 — Análise dos Dados:** os sete gráficos da EDA com filtros interativos (período, fase, seleção, Top N) e KPIs que reagem aos filtros.
+- **Seção 2 — Classificação Probabilística:** o usuário informa os atributos de uma partida (fase, público, **mandante**, **visitante** e **ano**) e recebe a previsão dos **três métodos** lado a lado, com a probabilidade por classe e um **destaque de consenso** (o resultado mais provável e quantos métodos concordam).
+
+A apresentação visual segue uma **identidade consistente**: cada resultado tem uma **cor semântica fixa** (mandante = teal, empate = âmbar, visitante = coral) repetida em todos os gráficos, facilitando a leitura; o tema claro e a tipografia foram escolhidos para boa legibilidade em projeção. O desempenho dos modelos fica acessível num painel de métricas dentro da própria Seção 2.
 
 ---
 
@@ -173,12 +192,13 @@ O dashboard (Seção 2) permite comparar visualmente as previsões dos **três m
 
 - O **fator casa** é o sinal mais forte do dataset: o mandante vence quase 6 em cada 10 partidas, e esse efeito é ainda maior nas fases de mata-mata.
 - A implementação **manual do Teorema de Bayes** consolidou a compreensão de prioris, verossimilhanças, posterioris e da necessidade de suavização de Laplace — indo além do simples uso de uma biblioteca.
-- A comparação entre Bayes, Árvore e KNN mostrou que, em um problema dominado por uma classe majoritária, ganhar acurácia é difícil, e que **métricas como precisão, recall e F1 por classe** revelam comportamentos que a acurácia esconde.
+- **A engenharia de atributos teve mais impacto que o tuning isolado:** adicionar a seleção visitante e a década fez a Árvore e o KNN finalmente superarem o baseline e o Bayes. Princípio central de ML: *o modelo só aprende o que os atributos permitem*.
+- A análise por **F1 macro, precisão e recall por classe** revelou comportamentos que a acurácia esconde — essencial num problema desbalanceado.
 
 **Limitações identificadas:**
 
-- **Poder preditivo limitado:** com apenas três preditoras categóricas, os modelos pouco superam o baseline da classe majoritária. Atributos como ranking das seleções, confronto direto histórico ou forma recente poderiam melhorar a previsão.
-- **Desbalanceamento das classes:** a predominância de vitórias do mandante penaliza a previsão de empates e vitórias do visitante.
+- **Teto de desempenho:** mesmo com tuning + feature engineering, a acurácia estaciona em ~61%. Resultados de futebol têm forte componente aleatório que os atributos disponíveis não capturam. Ranking/força das seleções, confronto direto histórico ou forma recente poderiam ir além.
+- **Desbalanceamento das classes:** a predominância de vitórias do mandante ainda penaliza a previsão de empates.
 - **Recorte temporal:** os dados vão até 2014, sem as edições mais recentes.
 - **Naive Bayes assume independência** entre as preditoras, o que nem sempre é verdade (público e fase, por exemplo, podem estar correlacionados).
 
